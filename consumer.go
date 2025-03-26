@@ -94,6 +94,11 @@ func (c *Consumer) Run(ctx context.Context) {
 						c.logger.Warn(runCtx, "Группа Kafka закрыта. Возможно, произошла ребалансировка или таймаут сессии.")
 						return // или реализуйте логику переподключения
 					}
+					if errors.Is(err, kafka.RequestTimedOut) {
+						c.logger.Warn(runCtx, "Тайм-аут при чтении сообщения из Kafka. Повторная попытка...")
+						time.Sleep(5 * time.Second) // Увеличенная задержка перед повторной попыткой
+						continue
+					}
 					c.logger.Error(runCtx, fmt.Errorf("ошибка чтения сообщения из Kafka: %w", err))
 					time.Sleep(1 * time.Second)
 					continue
