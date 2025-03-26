@@ -29,7 +29,7 @@ func NewProducer(cfg *configo.KafkaProducer, logger logit.Logger) *Producer {
 	}
 
 	debugLogger := kafka.LoggerFunc(func(msg string, args ...interface{}) {
-		logger.Debug(ctx, fmt.Sprintf(msg, args...))
+		logger.Info(ctx, fmt.Sprintf(msg, args...))
 	})
 	errorLogger := kafka.LoggerFunc(func(msg string, args ...interface{}) {
 		logger.Error(ctx, fmt.Errorf(msg, args...))
