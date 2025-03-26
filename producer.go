@@ -2,10 +2,13 @@ package kafkus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/segmentio/kafka-go"
 	"github.com/x3a-tech/configo"
 	"github.com/x3a-tech/logit-go"
+	"net"
+	"strconv"
 	"time"
 )
 
@@ -52,6 +55,53 @@ func NewProducer(cfg *configo.KafkaProducer, logger logit.Logger) *Producer {
 	}
 }
 
+func (p *Producer) TryCreateTopics(ctx context.Context, topics *configo.KafkaTopics) error {
+	const op = "transport.kafka.Producer.TryCreateTopics"
+	ctx = p.logger.NewOpCtx(ctx, op)
+
+	// Создаем подключение к одному из брокеров
+	conn, err := kafka.DialContext(ctx, "tcp", p.writer.Addr.String())
+	if err != nil {
+		return fmt.Errorf("ошибка подключения к Kafka: %w", err)
+	}
+
+	controller, err := conn.Controller()
+	if err != nil {
+		return fmt.Errorf("ошибка получения контроллера Kafka: %w", err)
+	}
+	defer conn.Close()
+
+	controllerConn, err := kafka.DialContext(ctx, "tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
+	if err != nil {
+		return fmt.Errorf("ошибка подключения к контроллеру Kafka: %w", err)
+	}
+	defer controllerConn.Close()
+
+	for _, topic := range topics.List {
+		topicConfigs := []kafka.TopicConfig{
+			{
+				Topic:             topic,
+				NumPartitions:     topics.NumPartitions,
+				ReplicationFactor: topics.ReplicationFactor,
+			},
+		}
+
+		err := controllerConn.CreateTopics(topicConfigs...)
+		if err != nil {
+			// Если топик уже существует, это не считается ошибкой
+			if !errors.Is(err, kafka.TopicAlreadyExists) {
+				p.logger.Warn(ctx, fmt.Sprintf("Не удалось создать топик %s: %v", topic, err))
+			} else {
+				p.logger.Info(ctx, fmt.Sprintf("Топик %s уже существует", topic))
+			}
+		} else {
+			p.logger.Info(ctx, fmt.Sprintf("Топик %s успешно создан", topic))
+		}
+	}
+
+	return nil
+}
+
 func (p *Producer) SendMessage(ctx context.Context, topic string, key []byte, value []byte) error {
 	const op = "transport.kafka.Producer.SendMessage"
 	ctx = p.logger.NewOpCtx(ctx, op)
@@ -67,14 +117,12 @@ func (p *Producer) SendMessage(ctx context.Context, topic string, key []byte, va
 		Time:  time.Now(),
 	}
 
-	// Используем контекст для WriteMessages
 	err := p.writer.WriteMessages(ctx, msg)
 	if err != nil {
 		p.logger.Error(ctx, fmt.Errorf("ошибка отправки сообщения в Kafka: %v", err))
 		return fmt.Errorf("ошибка отправки сообщения в Kafka: %w", err)
 	}
 
-	p.logger.Debug(ctx, "сообщение успешно отправлено в Kafka")
 	return nil
 }
 
