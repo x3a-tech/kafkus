@@ -101,7 +101,6 @@ func (c *Consumer) Run(ctx context.Context) {
 			}
 
 			msgCtx := c.logger.NewOpCtx(runCtx, "kafka.Consumer.Run.HandleMessage")
-			c.logger.Debug(msgCtx, fmt.Sprintf("Получено сообщение из Kafka (size: %d)", len(m.Value)))
 
 			err = c.handler(msgCtx, m.Value, m.Topic, m.Partition, m.Offset)
 			if err != nil {
@@ -114,8 +113,6 @@ func (c *Consumer) Run(ctx context.Context) {
 			if err := c.reader.CommitMessages(runCtx, m); err != nil {
 				c.logger.Error(msgCtx, fmt.Errorf("ошибка коммита сообщения: %w", err))
 				// Если коммит не удался, рискуем обработать сообщение повторно
-			} else {
-				c.logger.Debug(msgCtx, "Сообщение успешно обработано и закоммичено")
 			}
 		}
 	}()
