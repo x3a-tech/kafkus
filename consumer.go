@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-// MessageHandler - тип функции для обработки сообщений из Kafka
 type MessageHandler func(ctx context.Context, message []byte, topic string, partition int, offset int64) error
 
 type Consumer struct {
@@ -38,7 +37,6 @@ func NewConsumer(ctx context.Context, cfg *configo.KafkaConsumer, handler Messag
 		logger.Error(ctx, fmt.Errorf(msg, args...))
 	})
 
-	// Настраиваем Reader, используя поля из cfg *config.KafkaConsumer
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:           cfg.Brokers,
 		GroupID:           cfg.GroupID,
@@ -65,12 +63,11 @@ func NewConsumer(ctx context.Context, cfg *configo.KafkaConsumer, handler Messag
 	}, nil
 }
 
-// Run запускает цикл чтения сообщений из Kafka в отдельной горутине
 func (c *Consumer) Run(ctx context.Context) {
 	const op = "transport.kafka.Consumer.Run"
 	ctx = c.logger.NewOpCtx(ctx, op)
 
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
 
 	c.wg.Add(1)
@@ -83,42 +80,85 @@ func (c *Consumer) Run(ctx context.Context) {
 			if err != nil {
 				select {
 				case <-runCtx.Done():
-					c.logger.Info(runCtx, "Контекст отменен, Kafka consumer останавливается.")
+					c.logger.Info(runCtx, "Контекст отменен, Kafka consumer останавливает чтение.")
 					return
 				default:
 					if errors.Is(err, context.Canceled) {
-						c.logger.Info(runCtx, "Reader остановлен из-за отмены контекста.")
+						c.logger.Info(runCtx, "Чтение отменено.")
 						return
 					}
 					if errors.Is(err, kafka.ErrGroupClosed) {
-						c.logger.Warn(runCtx, "Группа Kafka закрыта. Возможно, произошла ребалансировка или таймаут сессии.")
-						return // или реализуйте логику переподключения
+						c.logger.Warn(runCtx, "Группа Kafka закрыта. Consumer останавливается.")
+						return
 					}
 					if errors.Is(err, kafka.RequestTimedOut) {
 						c.logger.Warn(runCtx, "Тайм-аут при чтении сообщения из Kafka. Повторная попытка...")
-						time.Sleep(5 * time.Second) // Увеличенная задержка перед повторной попыткой
-						continue
+						select {
+						case <-time.After(1 * time.Second):
+							continue
+						case <-runCtx.Done():
+							c.logger.Info(runCtx, "Контекст отменен во время паузы после таймаута.")
+							return
+						}
 					}
 					c.logger.Error(runCtx, fmt.Errorf("ошибка чтения сообщения из Kafka: %w", err))
-					time.Sleep(1 * time.Second)
-					continue
+					select {
+					case <-time.After(1 * time.Second):
+						continue
+					case <-runCtx.Done():
+						c.logger.Info(runCtx, "Контекст отменен во время паузы после ошибки.")
+						return
+					}
 				}
 			}
 
 			msgCtx := c.logger.NewOpCtx(runCtx, "kafka.Consumer.Run.HandleMessage")
 
-			err = c.handler(msgCtx, m.Value, m.Topic, m.Partition, m.Offset)
-			if err != nil {
-				c.logger.Error(msgCtx, fmt.Errorf("ошибка обработки сообщения: %w", err))
-				// TODO: Добавить логику Dead Letter Queue (DLQ) или ретраев, если нужно
-				continue // Переходим к следующему сообщению, не коммитя текущее
+			processErr := c.handler(msgCtx, m.Value, m.Topic, m.Partition, m.Offset)
+
+			if processErr != nil {
+				c.logger.Error(msgCtx, fmt.Errorf("ошибка обработки сообщения: %w", processErr))
+				continue
 			}
 
-			// Коммитим сообщение после успешной обработки
 			if err := c.reader.CommitMessages(runCtx, m); err != nil {
-				c.logger.Error(msgCtx, fmt.Errorf("ошибка коммита сообщения: %w", err))
-				// Если коммит не удался, рискуем обработать сообщение повторно
+				select {
+				case <-runCtx.Done():
+					c.logger.Info(msgCtx, "Контекст отменен во время попытки коммита.")
+					return
+				default:
+					c.logger.Error(msgCtx, fmt.Errorf("ошибка коммита сообщения: %w", err))
+				}
 			}
 		}
 	}()
+}
+
+func (c *Consumer) Close() error {
+	const op = "transport.kafka.Consumer.Close"
+	ctx := c.logger.NewOpCtx(context.Background(), op)
+
+	c.logger.Info(ctx, "Начало закрытия Kafka consumer...")
+
+	if c.cancel != nil {
+		c.logger.Info(ctx, "Отправка сигнала отмены в горутину Run...")
+		c.cancel()
+	} else {
+		c.logger.Warn(ctx, "Функция cancel не инициализирована, возможно Run() не был вызван.")
+	}
+
+	c.logger.Info(ctx, "Ожидание завершения горутины Run...")
+	c.wg.Wait()
+	c.logger.Info(ctx, "Горутина Run завершена.")
+
+	c.logger.Info(ctx, "Закрытие Kafka reader...")
+	err := c.reader.Close()
+	if err != nil {
+		c.logger.Error(ctx, fmt.Errorf("ошибка при закрытии Kafka reader: %w", err))
+		c.logger.Warn(ctx, "Kafka consumer закрыт с ошибкой.")
+		return fmt.Errorf("ошибка при закрытии Kafka reader: %w", err)
+	}
+
+	c.logger.Info(ctx, "Kafka consumer успешно закрыт.")
+	return nil
 }
